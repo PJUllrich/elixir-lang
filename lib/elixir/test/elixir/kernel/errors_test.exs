@@ -674,7 +674,7 @@ defmodule Kernel.ErrorsTest do
 
   test "function import conflict" do
     assert_compile_error(
-      ["nofile:3:16", "function exit/1 imported from both :erlang and Kernel, call is ambiguous"],
+      ["nofile:3:16", "conflicting exit/1 import from modules :erlang and Kernel"],
       ~c"""
       defmodule Kernel.ErrorsTest.FunctionImportConflict do
         import :erlang, only: [exit: 1], warn: false
@@ -684,7 +684,7 @@ defmodule Kernel.ErrorsTest do
     )
 
     assert_compile_error(
-      ["nofile:3:17", "function exit/1 imported from both :erlang and Kernel, call is ambiguous"],
+      ["nofile:3:17", "conflicting exit/1 import from modules :erlang and Kernel"],
       ~c"""
       defmodule Kernel.ErrorsTest.FunctionImportConflict do
         import :erlang, only: [exit: 1], warn: false

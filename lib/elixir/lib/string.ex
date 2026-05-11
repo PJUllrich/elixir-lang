@@ -745,7 +745,15 @@ defmodule String do
       iex> String.count("hello world", "")
       12
 
-  The `pattern` can also be a compiled pattern:
+  The `pattern` can also be a list:
+
+      iex> String.count("hello world", ["e", "o"])
+      3
+
+      iex> String.count("hello world", [])
+      0
+
+  Or a compiled pattern:
 
       iex> pattern = :binary.compile_pattern([" ", "!"])
       iex> String.count("foo bar baz!!", pattern)
@@ -755,6 +763,8 @@ defmodule String do
   @spec count(t, pattern | Regex.t()) :: non_neg_integer
   @doc since: "1.19.0"
   def count(string, <<>>), do: length(string) + 1
+
+  def count(_string, []), do: 0
 
   def count(string, pattern) when is_struct(pattern, Regex) do
     Kernel.length(Regex.scan(pattern, string, return: :index))

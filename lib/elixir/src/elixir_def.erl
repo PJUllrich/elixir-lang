@@ -247,7 +247,7 @@ def_to_clauses(_Kind, Meta, Args, Guards, [{do, Body}], _E) ->
 def_to_clauses(Kind, Meta, Args, Guards, Body, E) ->
   case is_list(Body) andalso lists:keyfind(do, 1, Body) of
     {do, _} ->
-      [{Meta, Args, Guards, {'try', [{origin,  Kind} | Meta], [Body]}}];
+      [{Meta, Args, Guards, {'try', [{definition,  Kind} | Meta], [Body]}}];
     false ->
       elixir_errors:file_error(Meta, E, elixir_expand, {missing_option, Kind, [do]})
   end.

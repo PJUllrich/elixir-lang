@@ -363,7 +363,7 @@ format_error({import, {conflict, Receiver}, Name, Arity}) ->
     "please rename the local macro or remove the conflicting import",
     [Name, Arity, elixir_aliases:inspect(Receiver), Name, Arity]);
 format_error({import, {ambiguous, [Mod1, Mod2 | _]}, Name, Arity}) ->
-  io_lib:format("function ~ts/~B imported from both ~ts and ~ts, call is ambiguous",
+  io_lib:format("conflicting ~ts/~B import from modules ~ts and ~ts",
     [Name, Arity, elixir_aliases:inspect(Mod1), elixir_aliases:inspect(Mod2)]);
 format_error({compile_env, Name, Arity}) ->
   io_lib:format("Application.~s/~B is discouraged in the module body, use Application.compile_env/3 instead", [Name, Arity]);

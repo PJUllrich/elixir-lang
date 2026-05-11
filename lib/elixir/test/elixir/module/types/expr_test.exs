@@ -1425,6 +1425,20 @@ defmodule Module.Types.ExprTest do
       assert typecheck!([x = 123, y = 456.0], x == y) == boolean()
     end
 
+    test "preserves static components across gradual self-intersections" do
+      assert typecheck!(
+               [x],
+               (
+                 # y :: :foo or dynamic()
+                 y = if :rand.uniform() > 0.5, do: :foo, else: x
+                 # y's type intersected with itself
+                 y = y
+
+                 y
+               )
+             ) == union(atom([:foo]), dynamic())
+    end
+
     test "in dynamic mode" do
       assert typedyn!([x = 123, y = 456.0], x < y) == dynamic(boolean())
       assert typedyn!([x = 123, y = 456.0], x == y) == dynamic(boolean())
@@ -1596,6 +1610,34 @@ defmodule Module.Types.ExprTest do
                    # from: types_test.ex:LINE-1
                    y = 123
                """
+
+      assert typewarn!(
+               [x],
+               cond do
+                 if(x, do: true, else: 1) -> :if
+                 x -> :x
+               end
+             ) ==
+               {atom([:if, :x]),
+                ~l"""
+                this clause in cond will always match:
+
+                    if x do
+                      true
+                    else
+                      1
+                    end
+
+                since it has type:
+
+                    true or integer()
+
+                where "x" was given the type:
+
+                    # type: dynamic()
+                    # from: types_test.ex:LINE-7
+                    x
+                """}
     end
 
     test "Integer.to_string/1" do
@@ -1812,7 +1854,31 @@ defmodule Module.Types.ExprTest do
                atom([:non_empty_map, :maybe_empty_map])
     end
 
-    test "computes types from dead branches (conditional)" do
+    test "consider external variables as not precise" do
+      assert typecheck!(
+               [x],
+               (
+                 res =
+                   case System.get_env("foo") do
+                     nil when x == :foo -> {:first, x}
+                     rest -> {:second, rest}
+                   end
+
+                 {x, res}
+               )
+             ) ==
+               dynamic(
+                 tuple([
+                   term(),
+                   union(
+                     tuple([atom([:first]), atom([:foo])]),
+                     tuple([atom([:second]), union(binary(), atom([nil]))])
+                   )
+                 ])
+               )
+    end
+
+    test "refine types when there are dead branches (conditional)" do
       assert typecheck!(
                [x],
                (
@@ -1835,6 +1901,17 @@ defmodule Module.Types.ExprTest do
                )
              ) == dynamic(negation(atom([:foo])))
 
+      assert typecheck!(
+               [x],
+               (
+                 if is_map(x) or is_integer(x) do
+                   raise "bad"
+                 end
+
+                 x
+               )
+             ) == dynamic(negation(union(open_map(), integer())))
+
       # When it is not precise enough, we don't filter
       assert typecheck!(
                [x],
@@ -1848,7 +1925,7 @@ defmodule Module.Types.ExprTest do
              ) == dynamic()
     end
 
-    test "computes types from dead branches (case)" do
+    test "refine types when there are branches (case)" do
       assert typecheck!(
                [x, key],
                (
@@ -2577,6 +2654,90 @@ defmodule Module.Types.ExprTest do
                     # from: types_test.ex:LINE-7
                     y = false
                 """}
+    end
+
+    test "refines types (2 clauses)" do
+      assert typecheck!(
+               [x],
+               cond do
+                 is_binary(x) -> {:first, x}
+                 true -> {:second, x}
+               end
+             ) ==
+               dynamic(
+                 union(
+                   tuple([atom([:first]), binary()]),
+                   tuple([atom([:second]), negation(binary())])
+                 )
+               )
+
+      # Negated types do not leak through
+      assert typecheck!(
+               [x],
+               (
+                 cond do
+                   is_binary(x) -> {:first, x}
+                   true -> {:second, x}
+                 end
+
+                 x
+               )
+             ) == dynamic()
+
+      # Unless one of them raise
+      assert typecheck!(
+               [x],
+               (
+                 cond do
+                   is_binary(x) -> raise "oops"
+                   true -> :ok
+                 end
+
+                 x
+               )
+             ) == dynamic(negation(binary()))
+
+      assert typecheck!(
+               [x],
+               (
+                 cond do
+                   is_binary(x) -> :ok
+                   true -> raise "oops"
+                 end
+
+                 x
+               )
+             ) == dynamic(binary())
+    end
+
+    test "refines types (3+ clauses)" do
+      assert typecheck!(
+               [x],
+               cond do
+                 is_binary(x) -> {:first, x}
+                 is_atom(x) -> {:second, x}
+                 true -> {:third, x}
+               end
+             ) ==
+               dynamic(
+                 tuple([atom([:first]), binary()])
+                 |> union(tuple([atom([:second]), atom()]))
+                 |> union(tuple([atom([:third]), negation(union(binary(), atom()))]))
+               )
+
+      # Negated types do not leak through
+      assert typecheck!(
+               [x],
+               (
+                 cond do
+                   is_binary(x) -> {:first, x}
+                   is_atom(x) -> {:second, x}
+                   true -> {:third, x}
+                 end
+
+                 x
+               )
+             ) == dynamic()
     end
 
     test "resets branches" do

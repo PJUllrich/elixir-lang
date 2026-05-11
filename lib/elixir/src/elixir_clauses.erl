@@ -540,8 +540,8 @@ warn_catch_before_rescue([_ | Rest], Meta, E, Found) ->
   warn_catch_before_rescue(Rest, Meta, E, Found).
 
 origin(Meta, Default) ->
-  case lists:keyfind(origin, 1, Meta) of
-    {origin, Origin} -> Origin;
+  case lists:keyfind(definition, 1, Meta) of
+    {definition, Definition} -> Definition;
     false -> Default
   end.
 

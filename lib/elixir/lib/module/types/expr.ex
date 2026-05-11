@@ -34,10 +34,6 @@ defmodule Module.Types.Expr do
             versioned_vars: open_map()
           )
 
-  # An annotation for terms where the reverse arrow is not yet fully defined.
-  # Also revisit all users of dynamic() in this module in a later date.
-  @pending term()
-
   # We do not make exception dynamic on purpose. If you do a blank rescue,
   # then we will assume you need to statically handle all possible exceptions.
   @exception open_map(__struct__: atom(), __exception__: term())
@@ -57,6 +53,9 @@ defmodule Module.Types.Expr do
                   tuple([fun(), args_or_arity, extra_info])
                 )
               )
+
+  @falsy atom([false, nil])
+  @truthy negation(atom([false, nil]))
 
   # :atom
   def of_expr(atom, _expected, _expr, _stack, context) when is_atom(atom),
@@ -287,57 +286,156 @@ defmodule Module.Types.Expr do
     of_expr(post, expected, post, stack, context)
   end
 
-  def of_expr({:cond, meta, [[{:do, clauses}]]}, expected, expr, stack, original) do
-    cache_result(meta, stack, original, fn ->
-      clauses
-      |> reduce_non_empty({none(), original}, fn
-        {:->, meta, [[head], body]}, {acc, context}, last? ->
-          {head_type, context} = of_expr(head, @pending, head, stack, context)
+  def of_expr(
+        {:cond, meta,
+         [
+           [
+             {:do,
+              [
+                {:->, pos_meta, [[pos_head], pos_body]},
+                {:->, _neg_meta, [[neg_head], neg_body]}
+              ]}
+           ]
+         ]},
+        expected,
+        expr,
+        stack,
+        acc_context
+      )
+      when is_atom(neg_head) and neg_head not in [false, nil] do
+    cache_result(meta, stack, acc_context, fn ->
+      {pos_head_type, context} =
+        of_expr(pos_head, term(), pos_head, %{stack | reverse_arrow: :cache}, acc_context)
 
-          context =
-            if is_warning(stack) do
-              case truthiness(head_type) do
-                :always_true when not last? ->
-                  warning = {:badcond, "always match", head_type, head, context}
-                  warn(__MODULE__, warning, meta, stack, context)
+      # Reset the context vars, keep warnings, as we will infer with expected truthy
+      context = Of.reset_vars(context, acc_context)
 
-                :always_false ->
-                  warning = {:badcond, "never match", head_type, head, context}
-                  warn(__MODULE__, warning, meta, stack, context)
+      context =
+        maybe_always_or_never_match_cond(pos_head_type, pos_head, pos_meta, stack, context, false)
 
-                _ ->
-                  context
-              end
-            else
-              context
-            end
+      {_, truthy_context} =
+        of_expr(pos_head, @truthy, pos_head, %{stack | reverse_arrow: :use}, context)
 
-          {body_type, context} = of_expr(body, expected, expr, stack, context)
-          {union(body_type, acc), Of.reset_vars(context, original)}
-      end)
-      |> dynamic_unless_static(stack)
+      # Keep the context except the warnings, and compute the body
+      context = reset_warnings(truthy_context, context)
+
+      {pos_body_type, context} =
+        of_expr(pos_body, expected, expr, stack, context)
+
+      # Reset the context vars once again to compute the falsy type
+      context = Of.reset_vars(context, acc_context)
+
+      {_, falsy_context} =
+        of_expr(pos_head, @falsy, pos_head, %{stack | reverse_arrow: :use}, context)
+
+      context = reset_warnings(falsy_context, context)
+
+      {neg_body_type, context} =
+        of_expr(neg_body, expected, expr, stack, context)
+
+      body_type = union(pos_body_type, neg_body_type)
+
+      context =
+        cond do
+          empty?(pos_body_type) -> Of.reset_vars(context, falsy_context)
+          empty?(neg_body_type) -> Of.reset_vars(context, truthy_context)
+          true -> Of.reset_vars(context, acc_context)
+        end
+
+      dynamic_unless_static({body_type, context}, stack)
     end)
   end
 
-  def of_expr({:case, meta, [case_expr, [{:do, _clauses}]]}, expected, _expr, stack, context)
+  def of_expr({:cond, meta, [[{:do, clauses}]]}, expected, expr, stack, context) do
+    cache_result(meta, stack, context, fn ->
+      {body_type, acc_context} =
+        reduce_non_empty(clauses, {none(), context}, fn
+          {:->, meta, [[head], body]}, {acc, acc_context}, last? ->
+            {head_type, context} =
+              of_expr(head, term(), head, %{stack | reverse_arrow: :cache}, acc_context)
+
+            # Reset the context vars, keep warnings, as we will infer with expected truthy
+            context = Of.reset_vars(context, acc_context)
+
+            context =
+              maybe_always_or_never_match_cond(head_type, head, meta, stack, context, last?)
+
+            {_, truthy_context} =
+              of_expr(head, @truthy, head, %{stack | reverse_arrow: :use}, context)
+
+            # Keep the context except the warnings, and compute the body
+            context = reset_warnings(truthy_context, context)
+
+            {body_type, context} =
+              of_expr(body, expected, expr, stack, context)
+
+            # Reset the context vars once again to compute the falsy type
+            context = Of.reset_vars(context, acc_context)
+
+            context =
+              if last? do
+                context
+              else
+                {_, falsy_context} =
+                  of_expr(head, @falsy, head, %{stack | reverse_arrow: :use}, context)
+
+                reset_warnings(falsy_context, context)
+              end
+
+            {union(body_type, acc), context}
+        end)
+
+      dynamic_unless_static({body_type, Of.reset_vars(acc_context, context)}, stack)
+    end)
+  end
+
+  def of_expr({:case, meta, [case_expr, [do: _clauses]]}, expected, _expr, stack, context)
       when stack.reverse_arrow == :use do
     version = Keyword.fetch!(meta, :version)
     clauses = Map.fetch!(context.reverse_arrows, version)
+    original = context
 
-    case_expected =
-      Enum.reduce(clauses, none(), fn {arg_type, body_type}, acc ->
+    context =
+      clauses
+      |> Enum.reduce({0, []}, fn {_arg_type, body_type, _clause} = triplet, {counter, acc} ->
         if disjoint?(body_type, expected) do
-          acc
+          {counter + 1, acc}
         else
-          union(arg_type, acc)
+          {counter, [triplet | acc]}
         end
       end)
+      |> case do
+        # Nothing skipped, just return the context as is
+        {0, _} ->
+          context
 
-    {_, context} = of_expr(case_expr, case_expected, case_expr, stack, context)
-    {expected, context}
+        # If there is a single clause, we assume it is always evaluated
+        # by doing reverse arrows and incorporting all variables into the context.
+        # We have to evaluate the head again but it might have been preferred
+        # if we could somehow merge a previously computed context.
+        {_, [{arg_type, _body_type, {:->, meta, [head, body]}}]} ->
+          {case_type, context} = of_expr(case_expr, arg_type, case_expr, stack, context)
+
+          {patterns, guards} = extract_head(head)
+          previous = Pattern.init_previous()
+          info = {{:case, meta, case_expr, case_type}, head}
+
+          {_, _, _, _, context} =
+            Pattern.of_head(patterns, guards, [case_type], previous, info, meta, stack, context)
+
+          {_, context} = of_expr(body, expected, body, stack, context)
+          reset_warnings(context, original)
+
+        {_, filtered} ->
+          case_expected = Enum.reduce(filtered, none(), &union(elem(&1, 0), &2))
+          {_, context} = of_expr(case_expr, case_expected, case_expr, stack, context)
+          reset_warnings(context, original)
+      end
+
+    dynamic_unless_static({expected, context}, stack)
   end
 
-  def of_expr({:case, meta, [case_expr, [{:do, clauses}]]}, expected, _expr, stack, base_context) do
+  def of_expr({:case, meta, [case_expr, [do: clauses]]}, expected, _expr, stack, base_context) do
     {case_type, context} =
       of_expr(case_expr, term(), case_expr, %{stack | reverse_arrow: :cache}, base_context)
 
@@ -360,46 +458,49 @@ defmodule Module.Types.Expr do
         clauses
       end
 
-    of_body = fn trees, body, context ->
-      [arg_type] = Pattern.of_domain(trees, stack, context)
+    cache_arrows(meta, stack, fn ->
+      acc = {false, none(), []}
 
-      {_, refined_context} =
-        of_expr(case_expr, arg_type, case_expr, %{stack | reverse_arrow: :use}, context)
+      {{none?, body_acc, clauses_acc}, context} =
+        of_clauses_fun(clauses, [case_type], info, stack, context, acc, fn
+          trees, precise?, {:->, _, [_, body]} = clause, context, acc ->
+            # Compute the arg type based on the clause itself
+            [arg_type] = Pattern.of_domain(trees, stack, context)
 
-      of_expr(body, expected, body, stack, reset_warnings(refined_context, context))
-    end
+            # Now we refine the case_expr context and use it to compute the body
+            {_, refined_context} =
+              of_expr(case_expr, arg_type, case_expr, %{stack | reverse_arrow: :use}, context)
 
-    {{none?, body_type}, clauses_acc, context} =
-      cache_arrows(meta, stack, fn _cache? ->
-        acc = {false, none(), []}
+            {body_type, context} =
+              of_expr(body, expected, body, stack, reset_warnings(refined_context, context))
 
-        {{head_acc, body_acc, clauses_acc}, context} =
-          of_clauses_fun(clauses, [case_type], info, stack, context, of_body, acc, fn
-            trees, precise?, body_type, context, {none?, body_acc, clauses_acc} ->
-              if precise? and empty?(body_type) do
-                {true, body_acc, clauses_acc}
-              else
-                [arg_type] = Pattern.of_domain(trees, stack, context)
-                {none?, union(body_type, body_acc), [{arg_type, body_type} | clauses_acc]}
-              end
-          end)
+            # Now we compute the return type and the clauses for reverse arrow
+            {none?, body_acc, clauses_acc} = acc
 
-        {{head_acc, body_acc}, clauses_acc, context}
-      end)
+            if precise? and empty?(body_type) do
+              {{true, body_acc, clauses_acc}, context}
+            else
+              [arg_type] = Pattern.of_domain(trees, stack, context)
+              clauses_acc = [{arg_type, body_type, clause} | clauses_acc]
+              {{none?, union(body_type, body_acc), clauses_acc}, context}
+            end
+        end)
 
-    context =
-      if none? do
-        head_type = Enum.reduce(clauses_acc, none(), &union(elem(&1, 0), &2))
+      context =
+        if none? do
+          head_type = Enum.reduce(clauses_acc, none(), &union(elem(&1, 0), &2))
 
-        {_, refined_context} =
-          of_expr(case_expr, head_type, case_expr, %{stack | reverse_arrow: :use}, context)
+          {_, refined_context} =
+            of_expr(case_expr, head_type, case_expr, %{stack | reverse_arrow: :use}, context)
 
-        reset_warnings(refined_context, context)
-      else
-        context
-      end
+          reset_warnings(refined_context, context)
+        else
+          context
+        end
 
-    dynamic_unless_static({body_type, context}, stack)
+      {body_acc, clauses_acc, context}
+    end)
+    |> dynamic_unless_static(stack)
   end
 
   # fn pat -> expr end
@@ -409,13 +510,12 @@ defmodule Module.Types.Expr do
       {patterns, _guards} = extract_head(head)
       domain = Enum.map(patterns, fn _ -> dynamic() end)
 
-      of_body = fn _args_types, body, context -> of_expr(body, term(), body, stack, context) end
-
       {acc, context} =
-        of_clauses_fun(clauses, domain, :fn, stack, context, of_body, [], fn
-          trees, _precise?, body_type, context, acc ->
+        of_clauses_fun(clauses, domain, :fn, stack, context, [], fn
+          trees, _precise?, {:->, _, [_, body]}, context, acc ->
+            {body_type, context} = of_expr(body, term(), body, stack, context)
             args_types = Pattern.of_domain(trees, stack, context)
-            add_inferred(acc, args_types, body_type)
+            {add_inferred(acc, args_types, body_type), context}
         end)
 
       {fun_from_inferred_clauses(acc), context}
@@ -826,6 +926,25 @@ defmodule Module.Types.Expr do
   defp reduce_non_empty([head | tail], acc, fun),
     do: reduce_non_empty(tail, fun.(head, acc, false), fun)
 
+  defp maybe_always_or_never_match_cond(head_type, head, meta, stack, context, last?) do
+    if is_warning(stack) do
+      case truthiness(head_type) do
+        :always_true when not last? ->
+          warning = {:badcond, "always match", head_type, head, context}
+          warn(__MODULE__, warning, meta, stack, context)
+
+        :always_false ->
+          warning = {:badcond, "never match", head_type, head, context}
+          warn(__MODULE__, warning, meta, stack, context)
+
+        _ ->
+          context
+      end
+    else
+      context
+    end
+  end
+
   defp dynamic_unless_static({_, _} = output, %{mode: :static}), do: output
   defp dynamic_unless_static({type, context}, %{mode: _}), do: {dynamic(type), context}
 
@@ -846,27 +965,33 @@ defmodule Module.Types.Expr do
     end
   end
 
-  defp cache_arrows(_meta, %{reverse_arrow: nil}, fun), do: fun.(false)
+  defp cache_arrows(_meta, %{reverse_arrow: nil}, fun) do
+    {result, _cache, context} = fun.()
+    {result, context}
+  end
 
   defp cache_arrows(meta, %{reverse_arrow: :cache}, fun) do
-    {result, cache, context} = fun.(true)
+    {result, cache, context} = fun.()
     version = Keyword.fetch!(meta, :version)
     context = put_in(context.reverse_arrows[version], cache)
-    {result, cache, context}
+    {result, context}
   end
 
   defp of_clauses(clauses, domain, expected, base_info, stack, context, acc) do
-    of_body = fn _args_types, body, context -> of_expr(body, expected, body, stack, context) end
-    of_acc = fn _args_types, _precise?, body_type, _context, acc -> union(acc, body_type) end
-    of_clauses_fun(clauses, domain, base_info, stack, context, of_body, acc, of_acc)
+    of_acc = fn _args_types, _precise?, {:->, _, [_, body]}, context, acc ->
+      {body_type, context} = of_expr(body, expected, body, stack, context)
+      {union(acc, body_type), context}
+    end
+
+    of_clauses_fun(clauses, domain, base_info, stack, context, acc, of_acc)
   end
 
-  defp of_clauses_fun(clauses, domain, base_info, stack, original, of_body, acc, of_acc) do
+  defp of_clauses_fun(clauses, domain, base_info, stack, original, acc, of_acc) do
     %{failed: failed?} = original
 
     {result, _previous, context} =
       Enum.reduce(clauses, {acc, Pattern.init_previous(), original}, fn
-        {:->, meta, [head, body]}, {acc, previous, context} ->
+        {:->, meta, [head, _]} = clause, {acc, previous, context} ->
           {failed?, context} = reset_failed(context, failed?)
           {patterns, guards} = extract_head(head)
           info = {base_info, head}
@@ -874,10 +999,8 @@ defmodule Module.Types.Expr do
           {trees, precise?, _, previous, context} =
             Pattern.of_head(patterns, guards, domain, previous, info, meta, stack, context)
 
-          {result, context} = of_body.(trees, body, context)
-
-          {of_acc.(trees, precise?, result, context, acc), previous,
-           context |> set_failed(failed?) |> Of.reset_vars(original)}
+          {acc, context} = of_acc.(trees, precise?, clause, context, acc)
+          {acc, previous, context |> set_failed(failed?) |> Of.reset_vars(original)}
       end)
 
     {result, context}

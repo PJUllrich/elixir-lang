@@ -358,6 +358,10 @@ defmodule Module.Types.DescrTest do
                closed_map(a: integer(), c: not_set())
              ) ==
                closed_map(a: integer())
+
+      assert intersection(empty_map(), closed_map(a: if_set(integer()))) == empty_map()
+      assert intersection(closed_map(a: if_set(integer())), empty_map()) == empty_map()
+      refute disjoint?(empty_map(), closed_map(a: if_set(integer())))
     end
 
     test "map with domain keys" do
@@ -646,7 +650,7 @@ defmodule Module.Types.DescrTest do
                closed_map(__struct__: difference(atom(), atom_bar))
 
       # Explicitly assert we keep it as cascading differences
-      assert %{map: {{:closed, _}, :bdd_bot, :bdd_bot, _}} =
+      assert %{map: {_, {_, :closed, _}, :bdd_bot, :bdd_bot, _}} =
                difference(
                  difference(
                    open_map(value: term()),
@@ -1496,11 +1500,30 @@ defmodule Module.Types.DescrTest do
         assert truthiness(dynamic(type)) == :always_false
       end
 
+      assert equal?(
+               intersection(union(atom(), dynamic()), union(atom(), dynamic())),
+               union(atom(), dynamic())
+             )
+
       for type <-
             [negation(atom()), atom([true]), negation(atom([false, nil])), atom([:ok]), integer()] do
         assert truthiness(type) == :always_true
         assert truthiness(dynamic(type)) == :always_true
       end
+
+      assert truthiness(union(atom([true]), integer())) == :always_true
+
+      empty_descr =
+        difference(tuple([number(), integer()]), open_tuple([float(), term()]))
+        |> difference(tuple([integer(), integer()]))
+
+      assert empty?(empty_descr)
+
+      assert truthiness(empty_descr) == :undefined
+      assert truthiness(dynamic(empty_descr)) == :undefined
+      assert truthiness(union(atom([nil]), empty_descr)) == :always_false
+
+      assert truthiness(union(atom([false]), empty_descr)) == :always_false
     end
 
     test "atom_fetch" do
@@ -1776,6 +1799,8 @@ defmodule Module.Types.DescrTest do
     end
 
     test "tuple_values" do
+      assert tuple_values(term()) == :badtuple
+      assert tuple_values(dynamic()) == dynamic()
       assert tuple_values(integer()) == :badtuple
       assert tuple_values(tuple([none()])) == :badtuple
       assert tuple_values(tuple([])) == none()
@@ -3079,19 +3104,19 @@ defmodule Module.Types.DescrTest do
       assert fun([integer()], boolean())
              |> union(fun([float()], boolean()))
              |> to_quoted_string() ==
-               "(integer() -> boolean()) or (float() -> boolean())"
+               "(float() -> boolean()) or (integer() -> boolean())"
 
       assert fun([integer()], boolean())
              |> intersection(fun([float()], boolean()))
              |> to_quoted_string() ==
-               "(integer() -> boolean()) and (float() -> boolean())"
+               "(float() -> boolean()) and (integer() -> boolean())"
 
       # Thanks to lazy BDDs, consecutive union of functions come out as the original union
       assert fun([integer()], integer())
              |> union(fun([float()], float()))
              |> union(fun([pid()], pid()))
              |> to_quoted_string() ==
-               "(integer() -> integer()) or (float() -> float()) or (pid() -> pid())"
+               "(integer() -> integer()) or (pid() -> pid()) or (float() -> float())"
 
       assert fun(3) |> to_quoted_string() == "(none(), none(), none() -> term())"
 
@@ -3134,14 +3159,14 @@ defmodule Module.Types.DescrTest do
 
       assert union(domain_part, codomain_part) |> to_quoted_string() ==
                """
-               (dynamic(atom()) or integer(), binary() -> float()) or
-                 (pid(), float() -> dynamic(atom()) or integer())\
+               (pid(), float() -> dynamic(atom()) or integer()) or
+                 (dynamic(atom()) or integer(), binary() -> float())\
                """
 
       assert intersection(domain_part, codomain_part) |> to_quoted_string() ==
                """
-               (dynamic(atom()) or integer(), binary() -> float()) and
-                 (pid(), float() -> dynamic(atom()) or integer())\
+               (pid(), float() -> dynamic(atom()) or integer()) and
+                 (dynamic(atom()) or integer(), binary() -> float())\
                """
     end
 
